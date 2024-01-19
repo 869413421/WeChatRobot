@@ -4,11 +4,11 @@
 import signal
 from argparse import ArgumentParser
 
-from base.func_report_reminder import ReportReminder
+from wcferry import Wcf
+
 from configuration import Config
 from constants import ChatType
 from robot import Robot, __version__
-from wcferry import Wcf
 
 
 def weather_report(robot: Robot) -> None:
@@ -39,27 +39,47 @@ def main(chat_type: int):
     robot = Robot(config, wcf, chat_type)
     robot.LOG.info(f"WeChatRobot【{__version__}】成功启动···")
 
-    # 机器人启动发送测试消息
-    robot.sendTextMsg("机器人启动成功！", "filehelper")
-
     # 接收消息
-    # robot.enableRecvMsg()     # 可能会丢消息？
     robot.enableReceivingMsg()  # 加队列
 
-    # 每天 7 点发送天气预报
-    robot.onEveryTime("07:00", weather_report, robot=robot)
+    # 历史上的今天
+    robot.onEveryTime("08:00", robot.todayInHistory)
 
-    # 每天 7:30 发送新闻
-    robot.onEveryTime("07:30", robot.newsReport)
+    # 发送新闻
+    robot.onEveryTime("08:00", robot.newsReport)
+
+    # 发送摸鱼
+    robot.onEveryTime("10:00", robot.moyu)
 
     # 每天 16:30 提醒发日报周报月报
-    robot.onEveryTime("16:30", ReportReminder.remind, robot=robot)
+    # robot.onEveryTime("17:30", ReportReminder.remind, robot=robot)
 
     # 让机器人一直跑
     robot.keepRunningAndBlockProcess()
 
 
 if __name__ == "__main__":
+    # import httpx
+    # from openai import OpenAI
+    # from pathlib import Path
+    #
+    # client = OpenAI(
+    #     api_key="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",
+    #     http_client=httpx.Client(
+    #         proxies="http://127.0.0.1:10809",
+    #     ),
+    # )
+    #
+    # speech_file_path = Path(__file__).parent / "speech.mp3"
+    # response = client.audio.speech.create(
+    #     model="tts-1",
+    #     voice="nova",
+    #     input="我爱你，爱着你就像老鼠爱大米。"
+    # )
+    #
+    # response.stream_to_file(speech_file_path)
+    # exit()
+
     parser = ArgumentParser()
     parser.add_argument('-c', type=int, default=0, help=f'选择模型参数序号: {ChatType.help_hint()}')
     args = parser.parse_args().c

@@ -29,10 +29,12 @@ class Config(object):
         logging.config.dictConfig(yconfig["logging"])
         self.GROUPS = yconfig["groups"]["enable"]
         self.NEWS = yconfig["news"]["receivers"]
+        self.TODAY = yconfig["today"]["receivers"]
         self.REPORT_REMINDERS = yconfig["report_reminder"]["receivers"]
-
+        self.SEND_AUDIO = yconfig.get("send_audio", {})
         self.CHATGPT = yconfig.get("chatgpt", {})
         self.TIGERBOT = yconfig.get("tigerbot", {})
         self.XINGHUO_WEB = yconfig.get("xinghuo_web", {})
         self.CHATGLM = yconfig.get("chatglm", {})
         self.BardAssistant = yconfig.get("bard", {})
+        self.DB = yconfig.get("db", {})

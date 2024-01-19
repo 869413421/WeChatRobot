@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 
 import logging
+import os
 import re
 import time
 import xml.etree.ElementTree as ET
+from datetime import datetime
 from queue import Empty
 from threading import Thread
 
+import requests
 from wcferry import Wcf, WxMsg
 
 from base.func_bard import BardAssistant
@@ -18,9 +21,12 @@ from base.func_tigerbot import TigerBot
 from base.func_xinghuo_web import XinghuoWeb
 from configuration import Config
 from constants import ChatType
+from dbtool import MysqlFactor
 from job_mgmt import Job
 
 __version__ = "39.0.10.1"
+
+from openapi.openapi import OpenAPIHandler
 
 
 class Robot(Job):
@@ -31,8 +37,12 @@ class Robot(Job):
         self.wcf = wcf
         self.config = config
         self.LOG = logging.getLogger("Robot")
-        self.wxid = self.wcf.get_self_wxid()
-        self.allContacts = self.getAllContacts()
+        if wcf:
+            self.wxid = self.wcf.get_self_wxid()
+            self.allContacts = self.getAllContacts()
+        db = MysqlFactor().create(config.DB, pool=False, log_enabled=True)
+        self.db = db
+        self.openapi = OpenAPIHandler()
 
         if ChatType.is_in_chat_types(chat_type):
             if chat_type == ChatType.TIGER_BOT.value and TigerBot.value_check(self.config.TIGERBOT):
@@ -76,6 +86,14 @@ class Robot(Job):
         :param msg: 微信消息结构
         :return: 处理状态，`True` 成功，`False` 失败
         """
+        self.LOG.info(f"接收到消息:{msg.content}")
+        cmd = re.sub(r"^@.*?[\u2005|\s]", "", msg.content).replace(" ", "")
+        if cmd == "tiktok":
+            sendPath = self.getAndSaveTiTokGirlVideo()
+            self.LOG.info(f"发送视频:{sendPath},到群聊:{msg.roomid}")
+            self.wcf.send_file(sendPath, msg.roomid)
+            return True
+
         return self.toChitchat(msg)
 
     def toChengyu(self, msg: WxMsg) -> bool:
@@ -108,18 +126,47 @@ class Robot(Job):
     def toChitchat(self, msg: WxMsg) -> bool:
         """闲聊，接入 ChatGPT
         """
+        send_image = False
+        q = re.sub(r"@.*?[\u2005|\s]", "", msg.content).replace(" ", "")
         if not self.chat:  # 没接 ChatGPT，固定回复
             rsp = "你@我干嘛？"
         else:  # 接了 ChatGPT，智能回复
-            q = re.sub(r"@.*?[\u2005|\s]", "", msg.content).replace(" ", "")
-            rsp = self.chat.get_answer(q, (msg.roomid if msg.from_group() else msg.sender))
-
+            if q.startswith("画图"):
+                send_image = True
+                rsp = q[2:]
+            elif q.startswith("找资源"):
+                result = self.openapi.search_movie(q[3:].strip())
+                if len(result["data"]) == 0:
+                    rsp = "🤔🤔🤔抱歉，没有找到任何相关资源。"
+                else:
+                    movie_str = ""
+                    for i in result['data'][:50]:
+                        movie_str += "【%s】(%s)\n" % (i['title'], i['url'])
+                    rsp = "😍😍😍找到以下资源😍😍😍：\n请复制链接到浏览器打开(非微信浏览器)\n%s" % movie_str
+            else:
+                if q.startswith("舔我"):
+                    rsp = self.openapi.dog()
+                else:
+                    rsp = self.chat.get_answer(q, (msg.roomid if msg.from_group() else msg.sender))
         if rsp:
             if msg.from_group():
-                self.sendTextMsg(rsp, msg.roomid, msg.sender)
-            else:
-                self.sendTextMsg(rsp, msg.sender)
+                if send_image:
+                    self.sendImageMsg(rsp, msg.roomid)
+                    return True
 
+                if self.config.SEND_AUDIO:
+                    self.sendAudioMsg(rsp, msg.roomid)
+                else:
+                    self.sendTextMsg(rsp, msg.roomid, msg.sender)
+            else:
+                if send_image:
+                    self.sendImageMsg(rsp, msg.sender)
+                    return True
+
+                if self.config.SEND_AUDIO:
+                    self.sendAudioMsg(rsp, msg.sender)
+                else:
+                    self.sendTextMsg(rsp, msg.sender)
             return True
         else:
             self.LOG.error(f"无法从 ChatGPT 获得答案")
@@ -133,6 +180,10 @@ class Robot(Job):
         receivers = msg.roomid
         self.sendTextMsg(content, receivers, msg.sender)
         """
+
+        sql = "INSERT INTO messages (id, type, xml, sender, roomid, content, thumb, extra) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+        val = (msg.id, msg.type, msg.xml, msg.sender, msg.roomid, msg.content, msg.thumb, msg.extra)
+        self.db.execute(sql, val)
 
         # 群聊消息
         if msg.from_group():
@@ -258,3 +309,110 @@ class Robot(Job):
         news = News().get_important_news()
         for r in receivers:
             self.sendTextMsg(news, r)
+
+    def moyu(self) -> None:
+        receivers = self.config.NEWS
+        if not receivers:
+            return
+
+        path1 = self.getAndSaveMoYu()
+        path2 = self.getAndSaveMoYu(1)
+        for r in receivers:
+            if path1:
+                self.wcf.send_file(path1, r)
+            if path2:
+                self.wcf.send_file(path2, r)
+
+    def todayInHistory(self) -> None:
+        receivers = self.config.TODAY
+        if not receivers:
+            return
+
+        result = OpenAPIHandler().todayInHistory()
+        history = result.get("result", [])
+        if len(history) == 0:
+            return
+
+        historyText = [f"{item['date']} {item['title']}" for item in history]
+        sendText = "历史上的今天 \n" + "\n".join(historyText)
+
+        for r in receivers:
+            self.sendTextMsg(sendText, r)
+
+    @staticmethod
+    def getAndSaveTiTokGirlVideo() -> str:
+        """获取 保存tiktok 美女视频"""
+        result = OpenAPIHandler().tiTokGirlVideo()
+        url = result.get("mp4", "")
+        if url == "":
+            return ""
+
+        # 通过URL下载视频
+        # 手动添加协议部分
+        full_url = 'https:' + url
+        response = requests.get(full_url, stream=True)
+        today = datetime.now().strftime("%Y-%m-%d")
+        dirPath = os.path.join(os.path.join(os.getcwd(), "video"), today)
+        if not os.path.exists(dirPath):
+            os.makedirs(dirPath)
+
+        # 毫秒时间戳字符串作为文件名
+        fileName = str(int(time.time() * 1000)) + ".mp4"
+        savePath = os.path.join(dirPath, fileName)
+        if response.status_code == 200:
+            with open(savePath, 'wb') as f:
+                f.write(response.content)
+            # 返回保存的路径和文件名
+            return savePath
+        else:
+            return ""
+
+    @staticmethod
+    def getAndSaveMoYu(my_type: int = 0) -> str:
+        """获取 保存摸鱼日报"""
+        if my_type == 1:
+            url = "https://dayu.qqsuu.cn/mingxingbagua/apis.php"
+        else:
+            url = "https://dayu.qqsuu.cn/moyuribao/apis.php"
+        today = datetime.now().strftime("%Y-%m-%d")
+        dirPath = os.path.join(os.path.join(os.getcwd(), "images"), today)
+        if not os.path.exists(dirPath):
+            os.makedirs(dirPath)
+        fileName = str(time.time()) + ".jpg"
+        savePath = os.path.join(dirPath, fileName)
+
+        try:
+            response = requests.get(url)
+            if response.status_code == 200:
+                with open(savePath, 'wb') as file:
+                    file.write(response.content)
+                return savePath
+            else:
+                return ""
+        except Exception as e:
+            print(e)
+            return ""
+
+    def sendAudioMsg(self, rsp, receiver) -> None:
+        """发送语音消息"""
+        filePath = self.chat.generateAudio(rsp)
+        self.wcf.send_file(filePath, receiver)
+
+    def sendImageMsg(self, rsp, receiver) -> None:
+        """发送图片消息"""
+        filePath = self.chat.generateImage(rsp)
+        print(filePath)
+        if filePath:
+            self.wcf.send_file(filePath, receiver)
+
+
+if __name__ == "__main__":
+    config = Config()
+    robot = Robot(config, None, 2)
+    # robot.todayInHistory()
+    # robot.newsReport()
+    path = robot.getAndSaveMoYu()
+    print(path)
+
+    path = robot.getAndSaveMoYu(1)
+    print(path)
